@@ -2,255 +2,234 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
-// ================================
-// ENVIRONMENT VARIABLES
-// ================================
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Environment variables with fallbacks
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'vf_webhook_2024_secure';
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'my_voiceflow_webhook_2024';
 const VOICEFLOW_API_KEY = process.env.VOICEFLOW_API_KEY;
 const VOICEFLOW_PROJECT_ID = process.env.VOICEFLOW_PROJECT_ID;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// ================================
-// MIDDLEWARE SETUP
-// ================================
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Validate environment variables
+const requiredEnvVars = {
+  WHATSAPP_TOKEN,
+  VOICEFLOW_API_KEY,
+  PHONE_NUMBER_ID
+};
 
-// CORS headers for Vercel
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
+for (const [key, value] of Object.entries(requiredEnvVars)) {
+  if (!value) {
+    console.error(`❌ Missing required environment variable: ${key}`);
   }
+}
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  const envCheck = {};
+  Object.keys(requiredEnvVars).forEach(key => {
+    envCheck[key] = !!process.env[key];
+  });
+
+  res.json({
+    status: 'WhatsApp Voiceflow Webhook is running! 🚀',
+    timestamp: new Date().toISOString(),
+    environment: 'Vercel',
+    environmentVariables: envCheck,
+    version: '2.0'
+  });
 });
 
-// ================================
-// WEBHOOK VERIFICATION (GET)
-// ================================
+// Webhook verification endpoint
 app.get('/webhook', (req, res) => {
+  console.log('🔍 Webhook verification request:', req.query);
+  
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  console.log('🔍 Webhook verification attempt:', { 
-    mode, 
-    token: token ? 'PROVIDED' : 'MISSING', 
-    challenge: challenge ? 'PROVIDED' : 'MISSING' 
-  });
-
-  if (mode === 'subscribe' && token === WHATSAPP_VERIFY_TOKEN) {
-    console.log('✅ Webhook verified successfully!');
-    res.status(200).send(challenge);
+  if (mode && token) {
+    if (mode === 'subscribe' && token === WHATSAPP_VERIFY_TOKEN) {
+      console.log('✅ Webhook verified successfully!');
+      res.status(200).send(challenge);
+    } else {
+      console.log('❌ Webhook verification failed - token mismatch');
+      console.log(`Expected: ${WHATSAPP_VERIFY_TOKEN}, Received: ${token}`);
+      res.sendStatus(403);
+    }
   } else {
-    console.log('❌ Webhook verification failed');
-    res.sendStatus(403);
+    console.log('❌ Missing verification parameters');
+    res.sendStatus(400);
   }
 });
 
-// ================================
-// WEBHOOK MESSAGE HANDLER (POST)
-// ================================
+// Handle incoming WhatsApp messages
 app.post('/webhook', async (req, res) => {
+  console.log('📨 Incoming webhook data:', JSON.stringify(req.body, null, 2));
+  
+  // Immediately respond to WhatsApp (prevents timeout)
+  res.sendStatus(200);
+
   try {
-    // Immediately acknowledge receipt
-    res.sendStatus(200);
-    
-    console.log('📨 Incoming webhook data:', JSON.stringify(req.body, null, 2));
-
-    const entry = req.body.entry?.[0];
-    if (!entry) {
-      console.log('⏭️ No entry found in webhook data');
+    // Validate webhook data structure
+    if (!req.body.entry || !Array.isArray(req.body.entry)) {
+      console.log('⚠️ Invalid webhook structure');
       return;
     }
 
-    const changes = entry.changes;
-    if (!changes || changes.length === 0) {
-      console.log('⏭️ No changes found in webhook data');
-      return;
-    }
+    // Process each entry
+    for (const entry of req.body.entry) {
+      if (!entry.changes || !Array.isArray(entry.changes)) continue;
 
-    // Process each change
-    for (const change of changes) {
-      if (change.field === 'messages' && change.value.messages) {
-        for (const message of change.value.messages) {
-          // Process message asynchronously to avoid blocking
-          processMessage(message, change.value).catch(error => {
-            console.error('❌ Error processing message:', error);
-          });
+      for (const change of entry.changes) {
+        if (change.field === 'messages' && change.value.messages) {
+          // Process messages asynchronously
+          for (const message of change.value.messages) {
+            // Use setImmediate to prevent blocking
+            setImmediate(() => handleMessage(message, change.value));
+          }
         }
       }
     }
-
   } catch (error) {
     console.error('❌ Webhook processing error:', error);
   }
 });
 
-// ================================
-// MESSAGE PROCESSING
-// ================================
-async function processMessage(message, messageData) {
-  const from = message.from;
-  const messageId = message.id;
-  const timestamp = message.timestamp;
-
-  console.log(`\n📱 Processing message from ${from} (ID: ${messageId})`);
-  console.log(`🕒 Message timestamp: ${new Date(timestamp * 1000).toISOString()}`);
-
-  // Extract user input based on message type
-  let userInput = '';
-  let messageType = message.type;
-
-  switch (messageType) {
-    case 'text':
-      userInput = message.text?.body || '';
-      break;
-      
-    case 'interactive':
-      if (message.interactive?.type === 'button_reply') {
-        userInput = message.interactive.button_reply.title;
-        console.log(`🔘 Button clicked: ${userInput}`);
-      } else if (message.interactive?.type === 'list_reply') {
-        userInput = message.interactive.list_reply.title;
-        console.log(`📋 List option selected: ${userInput}`);
-      }
-      break;
-      
-    case 'image':
-      userInput = message.image?.caption || 'User sent an image';
-      console.log(`🖼️ Image received with caption: ${userInput}`);
-      break;
-      
-    case 'audio':
-      userInput = 'User sent a voice message';
-      console.log('🎵 Audio message received');
-      break;
-      
-    case 'document':
-      userInput = message.document?.caption || 'User sent a document';
-      console.log(`📄 Document received: ${message.document?.filename}`);
-      break;
-      
-    default:
-      console.log(`⏭️ Unsupported message type: ${messageType}`);
-      return;
-  }
-
-  if (!userInput.trim()) {
-    console.log('⏭️ Empty message, skipping');
+// Handle individual messages
+async function handleMessage(message, messageData) {
+  if (!message || !message.from) {
+    console.log('⚠️ Invalid message structure');
     return;
   }
 
+  const from = message.from;
+  const messageId = message.id;
+  const messageType = message.type;
+
+  console.log(`📱 Processing message ${messageId} from ${from} (type: ${messageType})`);
+
+  // Extract message text based on type
+  let userInput = '';
+  
   try {
-    // Send typing indicator
-    await sendTypingIndicator(from);
+    switch (messageType) {
+      case 'text':
+        userInput = message.text?.body || '';
+        break;
+      case 'interactive':
+        if (message.interactive?.type === 'button_reply') {
+          userInput = message.interactive.button_reply.title;
+        } else if (message.interactive?.type === 'list_reply') {
+          userInput = message.interactive.list_reply.title;
+        }
+        break;
+      default:
+        console.log(`⏭️ Skipping unsupported message type: ${messageType}`);
+        return;
+    }
+
+    if (!userInput.trim()) {
+      console.log('⏭️ Empty message, skipping');
+      return;
+    }
+
+    console.log(`🤖 Processing input: "${userInput}"`);
+
+    // Send to Voiceflow with retry logic
+    const voiceflowResponse = await sendToVoiceflowWithRetry(from, userInput, 3);
     
-    // Send to Voiceflow
-    console.log(`🤖 Sending to Voiceflow: "${userInput}"`);
-    const voiceflowResponse = await sendToVoiceflow(from, userInput);
-    
-    // Process and send response
+    // Process response
     await processVoiceflowResponse(from, voiceflowResponse);
-    
-    console.log(`✅ Message processing completed for ${from}`);
-    
+
   } catch (error) {
-    console.error(`❌ Error processing message from ${from}:`, error);
+    console.error(`❌ Error handling message ${messageId}:`, error);
     
-    // Send error message to user
-    await sendWhatsAppText(from, "I'm sorry, I'm experiencing technical difficulties right now. Please try again in a few moments. 🤖💭");
+    // Send user-friendly error message
+    await sendWhatsAppTextSafe(from, "I'm having some technical difficulties right now. Please try again in a moment! 🤖");
   }
 }
 
-// ================================
-// VOICEFLOW INTEGRATION
-// ================================
-async function sendToVoiceflow(userId, message) {
-  try {
-    const payload = {
-      action: {
-        type: 'text',
-        payload: message
-      },
-      config: {
-        tts: false,
-        stripSSML: true,
-        stopAll: true,
-        excludeTypes: ["block", "debug", "flow"]
-      }
-    };
-
-    console.log('🔄 Voiceflow request payload:', JSON.stringify(payload, null, 2));
-
-    const response = await axios.post(
-      `https://general-runtime.voiceflow.com/state/user/${userId}/interact`,
-      payload,
-      {
-        headers: {
-          'Authorization': VOICEFLOW_API_KEY,
-          'Content-Type': 'application/json',
-          'versionID': 'production'
+// Send to Voiceflow with retry logic
+async function sendToVoiceflowWithRetry(userId, message, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`🤖 Attempt ${attempt}: Sending to Voiceflow`);
+      
+      const response = await axios.post(
+        `https://general-runtime.voiceflow.com/state/user/${userId}/interact`,
+        {
+          action: {
+            type: 'text',
+            payload: message
+          },
+          config: {
+            tts: false,
+            stripSSML: true,
+            stopAll: true,
+            excludeTypes: ["block", "debug", "flow"]
+          }
         },
-        timeout: 15000
+        {
+          headers: {
+            'Authorization': VOICEFLOW_API_KEY,
+            'Content-Type': 'application/json',
+            'versionID': 'production'
+          },
+          timeout: 10000 // 10 second timeout
+        }
+      );
+
+      console.log(`✅ Voiceflow response received (${response.data?.length || 0} traces)`);
+      return response.data || [];
+
+    } catch (error) {
+      console.error(`❌ Voiceflow attempt ${attempt} failed:`, error.response?.data || error.message);
+      
+      if (attempt === maxRetries) {
+        throw new Error(`Voiceflow failed after ${maxRetries} attempts`);
       }
-    );
-
-    console.log(`🤖 Voiceflow response: ${response.data?.length || 0} traces received`);
-    return response.data || [];
-
-  } catch (error) {
-    console.error('❌ Voiceflow API error:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-    throw new Error('Voiceflow API communication failed');
+      
+      // Wait before retry (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+    }
   }
 }
 
-// ================================
-// VOICEFLOW RESPONSE PROCESSING
-// ================================
+// Process Voiceflow response
 async function processVoiceflowResponse(to, traces) {
   if (!Array.isArray(traces) || traces.length === 0) {
     console.log('⚠️ No traces to process');
-    await sendWhatsAppText(to, "I understand your message, but I don't have a response ready right now. Could you please try rephrasing?");
+    await sendWhatsAppTextSafe(to, "I didn't understand that. Can you try rephrasing?");
     return;
   }
 
+  console.log(`📤 Processing ${traces.length} traces`);
+
   for (let i = 0; i < traces.length; i++) {
     const trace = traces[i];
-    console.log(`📤 Processing trace ${i + 1}/${traces.length}: ${trace.type}`);
-
+    
     try {
+      console.log(`Processing trace ${i + 1}/${traces.length}: ${trace.type}`);
+
       switch (trace.type) {
         case 'text':
           if (trace.payload?.message) {
-            await sendWhatsAppText(to, trace.payload.message);
+            await sendWhatsAppTextSafe(to, trace.payload.message);
           }
           break;
 
         case 'speak':
           if (trace.payload?.message) {
-            await sendWhatsAppText(to, trace.payload.message);
+            await sendWhatsAppTextSafe(to, trace.payload.message);
           }
           break;
 
         case 'visual':
           if (trace.payload?.image) {
-            await sendWhatsAppImage(to, trace.payload.image, trace.payload.text);
-          }
-          break;
-
-        case 'carousel':
-          if (trace.payload?.cards && trace.payload.cards.length > 0) {
-            await handleCarousel(to, trace.payload);
+            await sendWhatsAppImageSafe(to, trace.payload.image, trace.payload.text);
           }
           break;
 
@@ -260,128 +239,107 @@ async function processVoiceflowResponse(to, traces) {
           }
           break;
 
-        case 'cardV2':
-          await handleCardV2(to, trace.payload);
-          break;
-
         default:
-          console.log(`⏭️ Unhandled trace type: ${trace.type}`);
-          break;
+          console.log(`⏭️ Skipping unsupported trace type: ${trace.type}`);
       }
 
-      // Small delay between messages to avoid rate limits
+      // Small delay between messages to prevent rate limiting
       if (i < traces.length - 1) {
-        await delay(300);
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
 
     } catch (error) {
-      console.error(`❌ Error processing trace ${trace.type}:`, error);
+      console.error(`❌ Error processing trace ${i + 1}:`, error);
+      // Continue with other traces
     }
   }
 }
 
-// ================================
-// WHATSAPP MESSAGE SENDERS
-// ================================
+// Handle choice buttons
+async function handleChoiceButtons(to, payload) {
+  const buttons = payload.buttons || [];
+  const messageText = payload.message || "Please choose an option:";
 
-// Send typing indicator
-async function sendTypingIndicator(to) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: to,
-        type: "reaction",
-        reaction: {
-          message_id: to,
-          emoji: "⏳"
-        }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 5000
+  console.log(`🔘 Handling ${buttons.length} choice buttons`);
+
+  if (buttons.length === 0) return;
+
+  if (buttons.length <= 3) {
+    // Use WhatsApp interactive buttons (max 3)
+    const interactiveButtons = buttons.slice(0, 3).map((button, index) => ({
+      type: "reply",
+      reply: {
+        id: `btn_${index}_${Date.now()}`,
+        title: (button.name || `Option ${index + 1}`).substring(0, 20)
       }
-    );
-  } catch (error) {
-    // Typing indicator is not critical, so just log the error
-    console.log('ℹ️ Could not send typing indicator');
-  }
-}
+    }));
 
-// Send text message
-async function sendWhatsAppText(to, text) {
-  try {
-    if (!text || text.trim().length === 0) {
-      console.log('⚠️ Attempted to send empty text message');
-      return;
-    }
-
-    // WhatsApp has a 4096 character limit for text messages
-    const maxLength = 4000;
-    if (text.length > maxLength) {
-      // Split long messages
-      const chunks = text.match(new RegExp(`.{1,${maxLength}}`, 'g'));
-      for (const chunk of chunks) {
-        await sendWhatsAppText(to, chunk);
-        await delay(500);
-      }
-      return;
-    }
-
-    const response = await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: to,
-        type: "text",
-        text: { body: text }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
-
-    console.log('✅ Text message sent successfully');
-    return response.data;
-
-  } catch (error) {
-    console.error('❌ Failed to send text message:', {
-      message: error.message,
-      status: error.response?.status,
-      data: error.response?.data
+    await sendWhatsAppButtonsSafe(to, messageText, interactiveButtons);
+  } else {
+    // Convert to text with numbers for more than 3 options
+    let textMessage = messageText + "\n\n";
+    buttons.slice(0, 10).forEach((button, index) => {
+      textMessage += `${index + 1}. ${button.name}\n`;
     });
-    throw error;
+    textMessage += "\nPlease reply with the number of your choice.";
+
+    await sendWhatsAppTextSafe(to, textMessage);
   }
 }
 
-// Send image message
-async function sendWhatsAppImage(to, imageUrl, caption = '') {
-  try {
-    if (!imageUrl) {
-      console.log('⚠️ No image URL provided');
-      return;
-    }
+// Safe WhatsApp text sender with error handling
+async function sendWhatsAppTextSafe(to, text, maxRetries = 2) {
+  if (!text || !text.trim()) {
+    console.log('⚠️ Empty text message, skipping');
+    return;
+  }
 
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await axios.post(
+        `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+        {
+          messaging_product: "whatsapp",
+          to: to,
+          type: "text",
+          text: { body: text.trim() }
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15000
+        }
+      );
+
+      console.log(`✅ Text message sent successfully (attempt ${attempt})`);
+      return;
+
+    } catch (error) {
+      console.error(`❌ Text send attempt ${attempt} failed:`, error.response?.data || error.message);
+      
+      if (attempt === maxRetries) {
+        console.error(`❌ Failed to send text after ${maxRetries} attempts`);
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+}
+
+// Safe WhatsApp image sender
+async function sendWhatsAppImageSafe(to, imageUrl, caption = '') {
+  try {
     const payload = {
       messaging_product: "whatsapp",
       to: to,
       type: "image",
-      image: {
-        link: imageUrl
-      }
+      image: { link: imageUrl }
     };
 
     if (caption && caption.trim()) {
-      payload.image.caption = caption.substring(0, 1024); // WhatsApp caption limit
+      payload.image.caption = caption.trim();
     }
 
     await axios.post(
@@ -399,26 +357,15 @@ async function sendWhatsAppImage(to, imageUrl, caption = '') {
     console.log('✅ Image message sent successfully');
 
   } catch (error) {
-    console.error('❌ Failed to send image:', error.response?.data || error.message);
-    
-    // Fallback: send caption as text if image fails
-    if (caption) {
-      await sendWhatsAppText(to, `🖼️ ${caption}`);
-    }
+    console.error('❌ Image send failed:', error.response?.data || error.message);
+    // Fallback to text message
+    await sendWhatsAppTextSafe(to, caption || 'Image not available');
   }
 }
 
-// Send interactive buttons
-async function sendWhatsAppButtons(to, text, buttons) {
+// Safe WhatsApp buttons sender
+async function sendWhatsAppButtonsSafe(to, text, buttons) {
   try {
-    if (!buttons || buttons.length === 0) {
-      await sendWhatsAppText(to, text);
-      return;
-    }
-
-    // WhatsApp allows max 3 buttons
-    const limitedButtons = buttons.slice(0, 3);
-
     await axios.post(
       `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
       {
@@ -428,7 +375,7 @@ async function sendWhatsAppButtons(to, text, buttons) {
         interactive: {
           type: "button",
           body: { text: text },
-          action: { buttons: limitedButtons }
+          action: { buttons: buttons }
         }
       },
       {
@@ -436,93 +383,41 @@ async function sendWhatsAppButtons(to, text, buttons) {
           'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
           'Content-Type': 'application/json'
         },
-        timeout: 10000
+        timeout: 15000
       }
     );
 
-    console.log(`✅ Interactive buttons sent (${limitedButtons.length} buttons)`);
+    console.log('✅ Button message sent successfully');
 
   } catch (error) {
-    console.error('❌ Failed to send buttons:', error.response?.data || error.message);
+    console.error('❌ Button send failed:', error.response?.data || error.message);
     
-    // Fallback: send as numbered list
-    let fallbackText = text + '\n\n';
+    // Fallback to numbered text options
+    let fallbackText = text + "\n\n";
     buttons.forEach((button, index) => {
       fallbackText += `${index + 1}. ${button.reply.title}\n`;
     });
-    await sendWhatsAppText(to, fallbackText);
+    fallbackText += "\nPlease reply with the number of your choice.";
+    
+    await sendWhatsAppTextSafe(to, fallbackText);
   }
 }
 
-// Send interactive list
-async function sendWhatsAppList(to, bodyText, buttonText, sections) {
-  try {
-    if (!sections || sections.length === 0) {
-      await sendWhatsAppText(to, bodyText);
-      return;
-    }
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('❌ Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: "whatsapp",
-        to: to,
-        type: "interactive",
-        interactive: {
-          type: "list",
-          header: { type: "text", text: "Select an Option" },
-          body: { text: bodyText },
-          action: {
-            button: buttonText,
-            sections: sections
-          }
-        }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
+// Export for Vercel
+module.exports = app;
 
-    console.log('✅ Interactive list sent successfully');
-
-  } catch (error) {
-    console.error('❌ Failed to send list:', error.response?.data || error.message);
-    
-    // Fallback: send as numbered text
-    let fallbackText = bodyText + '\n\n';
-    sections.forEach(section => {
-      section.rows.forEach((row, index) => {
-        fallbackText += `${index + 1}. ${row.title}\n`;
-      });
-    });
-    await sendWhatsAppText(to, fallbackText);
-  }
+// Local development server (won't run on Vercel)
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log('📱 WhatsApp Voiceflow Webhook ready!');
+    console.log(`🔗 Webhook URL: http://localhost:${PORT}/webhook`);
+  });
 }
-
-// ================================
-// CONTENT HANDLERS
-// ================================
-
-// Handle carousel
-async function handleCarousel(to, payload) {
-  const cards = payload.cards || [];
-  if (cards.length === 0) return;
-
-  console.log(`🎠 Processing carousel with ${cards.length} cards`);
-
-  // Send carousel title if available
-  if (payload.title) {
-    await sendWhatsAppText(to, `*${payload.title}*`);
-    await delay(500);
-  }
-
-  if (cards.length === 1) {
-    // Single card - send as image with text
-    const card = cards[0];
-    
-    if (card.imageUrl) {
-      const caption = card.title + (card.description ?
